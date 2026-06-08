@@ -106,6 +106,12 @@ export class AuthService {
             throw new ConflictException("Your Account not Active by Admin, Please Cantact the Admin");
         }
 
+        const checkpass = await bcrypt.compare(dto.password, user.password)
+
+        if (!checkpass) {
+            throw new UnauthorizedException("Password not Match...")
+        }
+
         const location = getLocationFromIP(ipAddress || "");
         const safeIP = String(ipAddress || "0.0.0.0");
 
@@ -134,6 +140,13 @@ export class AuthService {
             },
         });
 
+        await this.emailService.NotificationEmail(
+            dto.email,
+            "login Success",
+            ipAddress,
+            userAgent,
+        )
+
         return {
             success: true,
             message: "Login Success",
@@ -146,36 +159,42 @@ export class AuthService {
         ipAddress?: string,
         userAgent?: string,
     ) {
-        const user = await this.userModel.findOne({ email: email })
+        const user = await this.userModel.findOne({ email });
 
         if (!user) {
-            throw new NotFoundException("User Cannot be Found")
+            throw new NotFoundException("User Cannot be Found");
         }
 
-        const checkrequests = await this.passresetModel.deleteMany({ email: email })
+        await this.passresetModel.deleteMany({ email });
 
-        const resettoken = await this.jwtService.signAsync({
-            sub: user._id,
-            email: user.email,
-            expire: new Date(Date.now() + 10 * 60 * 1000),
-            type: "PASSWORD_RESET"
+        const resettoken = await this.jwtService.signAsync(
+            {
+                sub: user._id,
+                email: user.email,
+                type: "PASSWORD_RESET",
+            },
+            {
+                expiresIn: "10m",
+            }
+        );
+
+        const hashedToken = await bcrypt.hash(resettoken, 10);
+
+        await this.passresetModel.create({
+            email,
+            token: hashedToken,
+            expireAt: new Date(Date.now() + 10 * 60 * 1000),
         });
 
-        const hashtoken = bcrypt.hash(resettoken, 10)
+        const location = getLocationFromIP(ipAddress || "");
 
-        const createtoken = this.passresetModel.create({
-            email: email,
-            token: hashtoken,
-            expireAt: new Date(Date.now() + 10 * 60 * 1000),
-        })
-
-        const frontendlink = this.configService.get<string>('FRONTEND_URL')
-        const resetlink = `${frontendlink}/password-reset/token=?${resettoken}`;
+        const frontendlink = this.configService.get<string>("FRONTEND_URL");
+        const resetlink = `${frontendlink}/password-reset?token=${resettoken}`;
 
         await createAuditLog(this.auditlogModel, {
             user: user._id,
             action: "REQUEST_PASSWORD_RESET",
-            description: `${email} user Login Success`,
+            description: `${email} requested password reset`,
             ipAddress,
             userAgent,
             metadata: {
@@ -185,18 +204,17 @@ export class AuthService {
             },
         });
 
-
         await this.emailService.sendPassresetLink(
             email,
             resetlink,
             ipAddress,
             userAgent,
-        )
+        );
 
         return {
             success: true,
-            message: "The Password Reset Link send to your Email Address"
-        }
+            message: "The Password Reset Link sent to your Email Address",
+        };
     }
 
     async UpdatePassword(
@@ -205,46 +223,54 @@ export class AuthService {
         ipAddress?: string,
         userAgent?: string,
     ) {
-        const payload = await this.jwtService.verify(token)
-        const user = await this.userModel.findOne({ email: payload.email })
+        if (!token) {
+            throw new UnauthorizedException("Token missing");
+        }
+
+        let payload: any;
+
+        try {
+            payload = await this.jwtService.verifyAsync(token);
+        } catch (error) {
+            throw new UnauthorizedException("Token expired or invalid");
+        }
+
+        const resetRecord = await this.passresetModel.findOne({
+            email: payload.email,
+            expireAt: { $gt: new Date() },
+        });
+
+        if (!resetRecord) {
+            throw new UnauthorizedException("Token expired or invalid");
+        }
+
+        const isMatch = await bcrypt.compare(token, resetRecord.token);
+
+        if (!isMatch) {
+            throw new UnauthorizedException("Token is Invalid");
+        }
+
+        const user = await this.userModel.findOne({ email: payload.email });
 
         if (!user) {
-            throw new NotFoundException("The User Not Found")
+            throw new NotFoundException("User Not Found");
         }
 
-        if (payload.type === "PASSWORD_RESET") {
-            throw new UnauthorizedException("Token is Invalid")
-        }
+        const hashnewpass = await bcrypt.hash(dto.new_password, 10);
 
-        if (payload.expire > new Date()) {
-            throw new UnauthorizedException("Your Password Reset Token Expired...")
-        }
-
-        const hashnewpass = await bcrypt.hash(dto.new_password, 10)
-
-        const updateuser = await this.userModel.findOneAndUpdate(
+        await this.userModel.findOneAndUpdate(
             { email: payload.email },
-            {
-                password: hashnewpass
-            },
-            { new: true }
-        )
+            { password: hashnewpass }
+        );
 
-        if (!updateuser) {
-            throw new ConflictException("Error While Updating Password")
-        }
+        const location = getLocationFromIP(ipAddress || "");
 
-        await this.emailService.NotificationEmail(
-            payload.email,
-            "Password Updated Success",
-            ipAddress,
-            userAgent
-        )
+        await this.passresetModel.deleteMany({ email: payload.email });
 
         await createAuditLog(this.auditlogModel, {
             user: user._id,
             action: "UPDATE_PASSWORD_SUCCESS",
-            description: `${payload.email} Password Updated Success`,
+            description: `${payload.email} password updated successfully`,
             ipAddress,
             userAgent,
             metadata: {
@@ -256,7 +282,7 @@ export class AuthService {
 
         return {
             success: true,
-            message: "Password Update Success"
-        }
+            message: "Password Updated Success",
+        };
     }
 }
