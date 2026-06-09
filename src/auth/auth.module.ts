@@ -32,7 +32,7 @@ import { EmailService } from "src/common/utils/email.util";
     ],
     controllers: [AuthController],
     providers: [AuthService, JwtStrategy, EmailService ],
-    exports: [AuthService],   
+    exports: [AuthService, JwtModule],   
     
 })
 
